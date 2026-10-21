@@ -1,0 +1,6 @@
+{
+  "name": "PDF Mock Test Generator & Exam Simulator",
+  "description": "Upload any PDF, choose specific pages and question count, and take realistic online mock exams with instant scoring and detailed explanations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
