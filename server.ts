@@ -31,6 +31,11 @@ const ai = new GoogleGenAI({
 // Endpoint: Generate Quiz from PDF text or PDF base64
 app.post('/api/generate-quiz', async (req, res) => {
   try {
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(500).json({
+        error: 'সার্ভারে GEMINI_API_KEY পাওয়া যায়নি। অনুগ্রহ করে Settings > Secrets বা Environment Variables-এ GEMINI_API_KEY সেট করুন।',
+      });
+    }
     const {
       pdfText,
       pdfBase64,

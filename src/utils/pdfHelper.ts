@@ -7,71 +7,77 @@ try {
   console.warn('PDF worker init fallback', e);
 }
 
-export interface ExtractedPDFData {
+export interface PDFDocumentHandle {
   fileName: string;
   totalPages: number;
-  pagesText: Record<number, string>; // 1-indexed page -> extracted text
-  totalChars: number;
+  pdfDoc: any;
+  cachedPages: Record<number, string>;
 }
 
 /**
- * Extracts text page by page from an uploaded PDF file
+ * Loads a PDF file and instantly extracts metadata & total page count without looping
  */
-export async function extractPDFPages(
-  file: File,
-  onProgress?: (current: number, total: number) => void
-): Promise<ExtractedPDFData> {
+export async function loadPDFDocument(file: File): Promise<PDFDocumentHandle> {
   const arrayBuffer = await file.arrayBuffer();
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) });
   const pdfDoc = await loadingTask.promise;
   const totalPages = pdfDoc.numPages;
 
-  const pagesText: Record<number, string> = {};
-  let totalChars = 0;
-
-  for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-    try {
-      const page = await pdfDoc.getPage(pageNum);
-      const textContent = await page.getTextContent();
-      const pageStrings = textContent.items
-        .map((item: any) => ('str' in item ? item.str : ''))
-        .filter(Boolean);
-      
-      const pageFullText = pageStrings.join(' ');
-      pagesText[pageNum] = pageFullText;
-      totalChars += pageFullText.length;
-    } catch (err) {
-      console.error(`Error extracting page ${pageNum}:`, err);
-      pagesText[pageNum] = '';
-    }
-
-    if (onProgress) {
-      onProgress(pageNum, totalPages);
-    }
-  }
-
   return {
     fileName: file.name,
     totalPages,
-    pagesText,
-    totalChars,
+    pdfDoc,
+    cachedPages: {},
   };
 }
 
 /**
- * Converts a File to Base64 string (without data URL prefix)
+ * Extracts text ONLY for the selected page numbers (lightning-fast, even for 500+ page PDFs)
  */
-export async function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = () => {
-      const result = reader.result as string;
-      const base64 = result.split(',')[1] || '';
-      resolve(base64);
-    };
-    reader.onerror = (error) => reject(error);
-  });
+export async function extractSelectedPagesText(
+  handle: PDFDocumentHandle,
+  pageNumbers: number[],
+  onProgress?: (current: number, total: number) => void
+): Promise<{ text: string; pagesText: Record<number, string> }> {
+  const pagesText: Record<number, string> = { ...handle.cachedPages };
+  let combinedText = '';
+
+  const uniquePages = Array.from(new Set(pageNumbers))
+    .filter(p => p >= 1 && p <= handle.totalPages)
+    .sort((a, b) => a - b);
+
+  for (let i = 0; i < uniquePages.length; i++) {
+    const pageNum = uniquePages[i];
+
+    if (!pagesText[pageNum]) {
+      try {
+        const page = await handle.pdfDoc.getPage(pageNum);
+        const textContent = await page.getTextContent();
+        const pageStrings = textContent.items
+          .map((item: any) => ('str' in item ? item.str : ''))
+          .filter(Boolean);
+        
+        pagesText[pageNum] = pageStrings.join(' ');
+        handle.cachedPages[pageNum] = pagesText[pageNum];
+      } catch (err) {
+        console.error(`Error extracting page ${pageNum}:`, err);
+        pagesText[pageNum] = '';
+      }
+    }
+
+    if (onProgress) {
+      onProgress(i + 1, uniquePages.length);
+    }
+
+    if (pagesText[pageNum] && pagesText[pageNum].trim().length > 0) {
+      combinedText += `\n--- PAGE ${pageNum} ---\n${pagesText[pageNum]}\n`;
+    }
+  }
+
+  return {
+    text: combinedText,
+    pagesText,
+  };
 }
 
 /**
@@ -79,7 +85,7 @@ export async function fileToBase64(file: File): Promise<string> {
  */
 export function parsePageRangeString(rangeStr: string, maxPages: number): number[] {
   if (!rangeStr || !rangeStr.trim()) {
-    return Array.from({ length: maxPages }, (_, i) => i + 1);
+    return Array.from({ length: Math.min(maxPages, 5) }, (_, i) => i + 1);
   }
 
   const pages = new Set<number>();
@@ -109,7 +115,7 @@ export function parsePageRangeString(rangeStr: string, maxPages: number): number
   }
 
   const result = Array.from(pages).sort((a, b) => a - b);
-  return result.length > 0 ? result : Array.from({ length: maxPages }, (_, i) => i + 1);
+  return result.length > 0 ? result : Array.from({ length: Math.min(maxPages, 5) }, (_, i) => i + 1);
 }
 
 /**

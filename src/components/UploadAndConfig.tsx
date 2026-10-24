@@ -19,10 +19,10 @@ import {
   Globe
 } from 'lucide-react';
 import { 
-  extractPDFPages, 
-  fileToBase64, 
+  loadPDFDocument,
+  extractSelectedPagesText,
   parsePageRangeString, 
-  ExtractedPDFData, 
+  PDFDocumentHandle, 
   SAMPLE_DATASETS 
 } from '../utils/pdfHelper';
 import { QuizData } from '../types';
@@ -33,9 +33,9 @@ interface UploadAndConfigProps {
 
 export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz }) => {
   const [file, setFile] = useState<File | null>(null);
-  const [pdfData, setPdfData] = useState<ExtractedPDFData | null>(null);
-  const [isExtracting, setIsExtracting] = useState<boolean>(false);
-  const [extractProgress, setExtractProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
+  const [pdfHandle, setPdfHandle] = useState<PDFDocumentHandle | null>(null);
+  const [totalPages, setTotalPages] = useState<number>(0);
+  const [isLoadingPdf, setIsLoadingPdf] = useState<boolean>(false);
 
   // Quiz Configurations
   const [quizTitle, setQuizTitle] = useState<string>('Assurance: Chapter 1');
@@ -61,28 +61,30 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
 
     setErrorMessage(null);
     setFile(uploadedFile);
-    setIsExtracting(true);
+    setIsLoadingPdf(true);
     setQuizTitle(uploadedFile.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '));
 
     try {
-      const data = await extractPDFPages(uploadedFile, (current, total) => {
-        setExtractProgress({ current, total });
-      });
-      setPdfData(data);
-      const initialPages = Array.from({ length: Math.min(3, data.totalPages) }, (_, i) => i + 1);
+      // Instantly load PDF and get total page count (fast even for 500+ pages)
+      const handle = await loadPDFDocument(uploadedFile);
+      setPdfHandle(handle);
+      setTotalPages(handle.totalPages);
+
+      // Default select first few pages or 1-2
+      const initialPages = Array.from({ length: Math.min(2, handle.totalPages) }, (_, i) => i + 1);
       setSelectedPages(initialPages);
       setPageRangeInput(initialPages.length > 1 ? `1-${initialPages.length}` : '1');
     } catch (err: any) {
       console.error('Failed to parse PDF pages:', err);
-      setErrorMessage('পিডিএফ পড়তে সামান্য সমস্যা হয়েছে। তবে আপনি সরাসরি পরীক্ষা তৈরি করার চেষ্টা করতে পারেন।');
+      setErrorMessage('পিডিএফ পড়তে সমস্যা হয়েছে। ফাইলটি সুরক্ষিত বা ক্ষতিগ্রস্ত কি না পরীক্ষা করুন।');
     } finally {
-      setIsExtracting(false);
+      setIsLoadingPdf(false);
     }
   };
 
   const handlePageRangeChange = (value: string) => {
     setPageRangeInput(value);
-    const max = pdfData ? pdfData.totalPages : 50;
+    const max = totalPages > 0 ? totalPages : 50;
     const parsed = parsePageRangeString(value, max);
     setSelectedPages(parsed);
   };
@@ -100,10 +102,10 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
   };
 
   const selectAllPages = () => {
-    if (!pdfData) return;
-    const all = Array.from({ length: pdfData.totalPages }, (_, i) => i + 1);
+    if (totalPages <= 0) return;
+    const all = Array.from({ length: totalPages }, (_, i) => i + 1);
     setSelectedPages(all);
-    setPageRangeInput(`1-${pdfData.totalPages}`);
+    setPageRangeInput(`1-${totalPages}`);
   };
 
   const applyPreset = (preset: 'quick' | 'standard' | 'full') => {
@@ -121,7 +123,7 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
 
   const handleGenerate = async () => {
     setErrorMessage(null);
-    if (!file && !pdfData) {
+    if (!file && !pdfHandle) {
       setErrorMessage('অনুগ্রহ করে প্রথমে একটি পিডিএফ ফাইল আপলোড করুন অথবা নিচের ইনস্ট্যান্ট ডেমো থেকে সিলেক্ট করুন।');
       return;
     }
@@ -132,33 +134,29 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
     }
 
     setIsGenerating(true);
-    setStatusMessage('পিডিএফ পৃষ্ঠাগুলো বিশ্লেষণ করা হচ্ছে...');
+    setStatusMessage(`পৃষ্ঠা ${selectedPages.join(', ')} থেকে টেক্সট এক্সট্রাক্ট করা হচ্ছে...`);
 
     try {
       let combinedText = '';
-      if (pdfData) {
-        for (const p of selectedPages) {
-          const text = pdfData.pagesText[p] || '';
-          if (text) {
-            combinedText += `\n--- PAGE ${p} ---\n${text}\n`;
-          }
-        }
+      if (pdfHandle) {
+        // Extract text ON DEMAND only for the selected pages!
+        const extracted = await extractSelectedPagesText(pdfHandle, selectedPages, (current, total) => {
+          setStatusMessage(`নির্বাচিত পৃষ্ঠা এক্সট্রাক্ট হচ্ছে (${current}/${total})...`);
+        });
+        combinedText = extracted.text;
       }
 
-      let pdfBase64 = '';
-      if (file && combinedText.trim().length < 50) {
-        setStatusMessage('পিডিএফ ফাইলটি সরাসরি এনালাইসিসের জন্য প্রস্তুত হচ্ছে...');
-        pdfBase64 = await fileToBase64(file);
+      if (!combinedText || combinedText.trim().length < 20) {
+        throw new Error('নির্বাচিত পৃষ্ঠাগুলো থেকে কোনো লেখার বিষয়বস্তু (Text) পাওয়া যায়নি। পৃষ্ঠাগুলো স্ক্যান করা ছবি হলে বা খালি হলে প্রশ্ন তৈরি করা সম্ভব নয়। অন্য পৃষ্ঠা নির্বাচন করুন।');
       }
 
-      setStatusMessage(`পৃষ্ঠা ${selectedPages.join(', ')} থেকে ${questionCount}টি প্রশ্ন তৈরি হচ্ছে...`);
+      setStatusMessage(`পৃষ্ঠা ${selectedPages.join(', ')} থেকে ${questionCount}টি প্রশ্ন তৈরি হচ্ছে (Gemini AI)...`);
 
       const res = await fetch('/api/generate-quiz', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pdfText: combinedText,
-          pdfBase64: pdfBase64 || undefined,
           pageNumbers: selectedPages,
           questionCount: questionCount,
           quizTitle: quizTitle || 'Mock Test',
@@ -168,8 +166,23 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
       });
 
       if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || `সার্ভার ত্রুটি: ${res.statusText}`);
+        let errorDetail = '';
+        try {
+          const errJson = await res.json();
+          errorDetail = errJson.error || '';
+        } catch {
+          const text = await res.text().catch(() => '');
+          if (res.status === 404) {
+            errorDetail = 'সার্ভারে API এন্ডপয়েন্ট পাওয়া যায়নি (Error 404)। Vercel এ /api ফোল্ডার ডেপ্লয় হয়েছে কি না দেখুন।';
+          } else if (res.status === 413) {
+            errorDetail = 'অনুরোধটি অনেক বড় (Error 413: Payload Too Large)। অনুগ্রহ করে কম পৃষ্ঠা সিলেক্ট করুন।';
+          } else if (res.status === 500) {
+            errorDetail = 'সার্ভার এরর (Error 500)। Vercel এর Settings > Environment Variables-এ GEMINI_API_KEY সেট করা আছে কি না যাচাই করুন।';
+          } else {
+            errorDetail = text ? text.slice(0, 150) : `HTTP ত্রুটি: ${res.status}`;
+          }
+        }
+        throw new Error(errorDetail || `সার্ভার ত্রুটি: HTTP ${res.status}`);
       }
 
       const data = await res.json();
@@ -184,7 +197,7 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
         timeLimitMinutes: timeLimitMinutes,
         marksPerQuestion: marksPerQuestion,
         selectedPages: selectedPages,
-        pdfName: file ? file.name : (pdfData?.fileName || 'Document.pdf'),
+        pdfName: file ? file.name : 'Document.pdf',
         createdAt: new Date().toISOString(),
       };
 
@@ -339,7 +352,8 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
                     type="button"
                     onClick={() => {
                       setFile(null);
-                      setPdfData(null);
+                      setPdfHandle(null);
+                      setTotalPages(0);
                     }}
                     className="text-xs text-rose-600 hover:text-rose-700 font-medium flex items-center gap-1 cursor-pointer transition-colors"
                   >
@@ -398,7 +412,7 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
                         </p>
                         <p className="text-xs text-slate-500 mt-0.5">
                           সাইজ: {(file.size / (1024 * 1024)).toFixed(2)} MB • মোট পৃষ্ঠা:{' '}
-                          {isExtracting ? 'বিশ্লেষণ চলছে...' : pdfData ? `${pdfData.totalPages}টি পৃষ্ঠা` : 'স্ক্যান হচ্ছে'}
+                          {isLoadingPdf ? 'লোড হচ্ছে...' : totalPages > 0 ? `${totalPages}টি পৃষ্ঠা` : 'স্ক্যান হচ্ছে'}
                         </p>
                       </div>
                     </div>
@@ -407,22 +421,10 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
                     </span>
                   </div>
 
-                  {isExtracting && (
-                    <div className="pt-2 border-t border-slate-200">
-                      <div className="flex justify-between text-xs text-slate-600 mb-1.5 font-medium">
-                        <span>পৃষ্ঠা তথ্য সংগ্রহ হচ্ছে...</span>
-                        <span>
-                          {extractProgress.current} / {extractProgress.total} পৃষ্ঠা
-                        </span>
-                      </div>
-                      <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden">
-                        <div
-                          className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                          style={{
-                            width: `${extractProgress.total > 0 ? (extractProgress.current / extractProgress.total) * 100 : 0}%`,
-                          }}
-                        />
-                      </div>
+                  {isLoadingPdf && (
+                    <div className="pt-2 border-t border-slate-200 text-xs text-slate-500 flex items-center gap-2">
+                      <div className="w-3.5 h-3.5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                      <span>পিডিএফ ডকুমেন্ট রিড করা হচ্ছে...</span>
                     </div>
                   )}
                 </div>
@@ -456,36 +458,35 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
                       type="text"
                       value={pageRangeInput}
                       onChange={(e) => handlePageRangeChange(e.target.value)}
-                      placeholder="যেমন: 1-3, 5"
+                      placeholder="যেমন: 1-3, 5 বা 10-15"
                       className="flex-1 px-4 py-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono bg-white"
                     />
-                    {pdfData && (
+                    {totalPages > 0 && (
                       <button
                         type="button"
                         onClick={selectAllPages}
                         className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl transition-colors cursor-pointer shrink-0"
                       >
-                        সব পৃষ্ঠা ({pdfData.totalPages})
+                        সব পৃষ্ঠা ({totalPages})
                       </button>
                     )}
                   </div>
                 </div>
 
                 {/* Visual Page Buttons Grid */}
-                {pdfData && pdfData.totalPages > 0 && (
+                {totalPages > 0 && (
                   <div>
                     <div className="flex items-center justify-between text-xs text-slate-600 mb-2">
                       <span className="font-semibold text-slate-700">
-                        ক্লিক করে পৃষ্ঠা অন/অফ করুন (নির্বাচিত: {selectedPages.length}টি):
+                        ক্লিক করে পৃষ্ঠা অন/অফ করুন (নির্বাচিত: {selectedPages.length}টি পৃষ্ঠা):
                       </span>
                       <span className="text-blue-600 font-mono text-xs font-bold">
-                        [{selectedPages.join(', ')}]
+                        [{selectedPages.slice(0, 15).join(', ')}{selectedPages.length > 15 ? '...' : ''}]
                       </span>
                     </div>
                     <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto p-3 bg-slate-50 rounded-xl border border-slate-200">
-                      {Array.from({ length: pdfData.totalPages }, (_, i) => i + 1).map((pageNum) => {
+                      {Array.from({ length: Math.min(totalPages, 100) }, (_, i) => i + 1).map((pageNum) => {
                         const isSelected = selectedPages.includes(pageNum);
-                        const charCount = pdfData.pagesText[pageNum]?.length || 0;
                         return (
                           <button
                             key={pageNum}
@@ -496,13 +497,18 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
                                 ? 'bg-blue-600 text-white shadow-xs ring-2 ring-blue-600 ring-offset-1'
                                 : 'bg-white text-slate-700 border border-slate-300 hover:border-slate-400'
                             }`}
-                            title={`পৃষ্ঠা ${pageNum} (${charCount} অক্ষর)`}
+                            title={`পৃষ্ঠা ${pageNum}`}
                           >
                             <span>পৃষ্ঠা {pageNum}</span>
                             {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
                           </button>
                         );
                       })}
+                      {totalPages > 100 && (
+                        <span className="text-xs text-slate-400 self-center px-2">
+                          (১০০ এর বেশি পৃষ্ঠার জন্য উপরের রেঞ্জ বক্সে টাইপ করুন, যেমন: 105-115)
+                        </span>
+                      )}
                     </div>
                   </div>
                 )}
@@ -670,7 +676,7 @@ export const UploadAndConfig: React.FC<UploadAndConfigProps> = ({ onStartQuiz })
                 <button
                   type="button"
                   onClick={handleGenerate}
-                  disabled={isGenerating || isExtracting}
+                  disabled={isGenerating || isLoadingPdf}
                   className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 disabled:from-slate-400 disabled:to-slate-400 text-white font-bold rounded-xl shadow-md hover:shadow-lg transition-all duration-200 flex items-center justify-center gap-2 cursor-pointer text-sm sm:text-base group"
                 >
                   {isGenerating ? (
